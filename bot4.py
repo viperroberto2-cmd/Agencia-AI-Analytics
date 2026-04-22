@@ -10,7 +10,6 @@ Comandos:
 """
 
 import os
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from collections import Counter
@@ -163,6 +162,7 @@ def generar_reporte(desde: str, hasta: str, cliente: str = None, titulo: str = "
     # Bot con más pasos asignados
     bots_pasos = Counter(p.get("bot_responsable", "?") for p in todos_pasos)
     bot_mas_activo_proyectos = bots_pasos.most_common(1)[0] if bots_pasos else ("—", 0)
+    # ^^ usado más abajo en la sección de pasos de proyectos
 
     # Tiempo promedio de proyecto completado (ts_creado → ts_actualizado)
     tiempos = []
@@ -254,6 +254,8 @@ def generar_reporte(desde: str, hasta: str, cliente: str = None, titulo: str = "
             f"  • ❌ Fallidos: {pasos_fallidos}",
             f"  • 🎯 Tasa de éxito: {tasa_exito_pasos}%",
         ]
+        if bot_mas_activo_proyectos[0] != "—":
+            lineas.append(f"  • 🤖 Bot con más pasos: {bot_mas_activo_proyectos[0]} ({bot_mas_activo_proyectos[1]} pasos)")
 
     lineas += [
         "",
@@ -379,19 +381,12 @@ async def enviar_reporte_semanal(app: Application):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
-    if not TELEGRAM_TOKEN:
-        raise RuntimeError("ANALYTICS_BOT_TOKEN no configurado en variables de entorno.")
-
-    # Construir la aplicación de Telegram
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # Registrar comandos
-    app.add_handler(CommandHandler("start",            cmd_start))
-    app.add_handler(CommandHandler("reporte",          cmd_reporte))
-    app.add_handler(CommandHandler("reporte_cliente",  cmd_reporte_cliente))
-
-    # Programar reporte automático — cada lunes a las 8:00am UTC
+async def post_init(app: Application):
+    """
+    Se ejecuta dentro del event loop de PTB — aquí iniciamos el scheduler
+    para garantizar que comparte el mismo event loop y puede llamar
+    a app.bot.send_message() sin conflictos.
+    """
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         enviar_reporte_semanal,
@@ -403,6 +398,24 @@ def main():
     )
     scheduler.start()
     log.info("Scheduler iniciado — reporte semanal cada lunes 8:00 UTC")
+
+
+def main():
+    if not TELEGRAM_TOKEN:
+        raise RuntimeError("ANALYTICS_BOT_TOKEN no configurado en variables de entorno.")
+
+    # Construir la aplicación — post_init arranca el scheduler en el mismo event loop
+    app = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+
+    # Registrar comandos
+    app.add_handler(CommandHandler("start",            cmd_start))
+    app.add_handler(CommandHandler("reporte",          cmd_reporte))
+    app.add_handler(CommandHandler("reporte_cliente",  cmd_reporte_cliente))
 
     # Iniciar el bot (polling)
     log.info("Bot 4 Analytics iniciado.")
