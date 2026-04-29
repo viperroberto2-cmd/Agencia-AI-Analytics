@@ -13,6 +13,9 @@ import os
 import logging
 from datetime import datetime, timedelta, timezone
 from collections import Counter
+import anthropic
+import threading
+import time
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -39,10 +42,80 @@ TELEGRAM_TOKEN    = os.getenv("ANALYTICS_BOT_TOKEN")
 DIRECTOR_CHAT_ID  = os.getenv("DIRECTOR_CHAT_ID")          # chat_id del dueño de la agencia
 SUPABASE_URL      = os.getenv("SUPABASE_PROJECT_URL", "https://ydggwvpndcazmyvsdbec.supabase.co")
 SUPABASE_KEY      = os.getenv("SUPABASE_SECRET_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # ── Cliente Supabase ──────────────────────────────────────────────────────────
 
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ── Retry Claude 529 ──────────────────────────────────────────────────────────
+
+def claude_con_retry(client, **kwargs):
+    """Llama a client.messages.create con reintentos exponenciales para error 529."""
+    for intento in range(4):
+        try:
+            return client.messages.create(**kwargs)
+        except anthropic.APIStatusError as e:
+            if e.status_code == 529 and intento < 3:
+                espera = 5 * (2 ** intento)  # 5s, 10s, 20s
+                time.sleep(espera)
+            else:
+                raise
+
+# ── Analytics loop: OBSERVE→LEARN ─────────────────────────────────────────────
+
+def _calcular_metricas(desde: str, hasta: str, cliente=None) -> dict:
+    logs  = obtener_logs(desde, hasta, cliente)
+    proy  = obtener_proyectos(desde, hasta, cliente)
+    cont  = obtener_contenidos(desde, hasta, cliente)
+    total_logs = len(logs)
+    total_cont = len(cont)
+    errores    = sum(1 for l in logs if l.get("tipo") == "error")
+    aprobados  = sum(1 for c in cont if c.get("status") == "aprobado")
+    return {
+        "tasa_error":            round(errores / total_logs * 100) if total_logs else 0,
+        "total_proyectos":       len(proy),
+        "proyectos_completados": sum(1 for p in proy if p.get("estado") == "completado"),
+        "tasa_aprobacion":       round(aprobados / total_cont * 100) if total_cont else 0,
+        "total_logs":            total_logs,
+    }
+
+def analizar_y_guardar(metricas: dict, periodo: str, cliente=None):
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        prompt = (
+            f"Analiza estas métricas de la agencia de marketing IA y genera un insight en 2-3 líneas:\n"
+            f"Período: {periodo}\n"
+            f"Tasa de error: {metricas.get('tasa_error', 0)}%\n"
+            f"Proyectos completados: {metricas.get('proyectos_completados', 0)}/{metricas.get('total_proyectos', 0)}\n"
+            f"Tasa de aprobación de contenidos: {metricas.get('tasa_aprobacion', 0)}%\n"
+            f"Total eventos de bots: {metricas.get('total_logs', 0)}\n\n"
+            f"Responde solo con el insight, sin encabezados."
+        )
+        resp = claude_con_retry(client,
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        insight = resp.content[0].text.strip()
+        tasa_error = metricas.get("tasa_error", 0)
+        score = 8 if tasa_error < 10 else (6 if tasa_error < 20 else 4)
+        sb.table("specialist_memory").insert({
+            "agent_id":    "analytics",
+            "memory_type": "performance_report",
+            "content": {
+                "insight":        insight,
+                "metricas_clave": metricas,
+                "periodo":        periodo,
+                "cliente":        cliente or "general",
+            },
+            "score":       score,
+            "cliente":     cliente or None,
+            "context_key": cliente or "general",
+            "tags":        ["analytics", "reporte"] + ([cliente] if cliente else []),
+        }).execute()
+    except Exception:
+        pass
 
 # ── Helpers de fecha ──────────────────────────────────────────────────────────
 
@@ -328,6 +401,8 @@ async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desde, hasta = semana_actual()
     texto = generar_reporte(desde, hasta, titulo="REPORTE SEMANA ACTUAL")
     await update.message.reply_text(texto, parse_mode="Markdown")
+    metricas = _calcular_metricas(desde, hasta)
+    threading.Thread(target=analizar_y_guardar, args=(metricas, f"{desde[:10]}→{hasta[:10]}"), daemon=True).start()
 
 
 async def cmd_reporte_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -344,6 +419,8 @@ async def cmd_reporte_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE
     desde, hasta = semana_actual()
     texto = generar_reporte(desde, hasta, cliente=cliente, titulo=f"REPORTE — {cliente.upper()}")
     await update.message.reply_text(texto, parse_mode="Markdown")
+    metricas = _calcular_metricas(desde, hasta, cliente)
+    threading.Thread(target=analizar_y_guardar, args=(metricas, f"{desde[:10]}→{hasta[:10]}", cliente), daemon=True).start()
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -376,6 +453,8 @@ async def enviar_reporte_semanal(app: Application):
             parse_mode="Markdown"
         )
         log.info("Reporte semanal enviado exitosamente.")
+        metricas = _calcular_metricas(desde, hasta)
+        threading.Thread(target=analizar_y_guardar, args=(metricas, f"{desde[:10]}→{hasta[:10]}"), daemon=True).start()
     except Exception as e:
         log.error(f"Error enviando reporte semanal: {e}")
 
