@@ -16,6 +16,7 @@ from collections import Counter
 import anthropic
 import threading
 import time
+import httpx
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -43,6 +44,8 @@ DIRECTOR_CHAT_ID  = os.getenv("DIRECTOR_CHAT_ID")          # chat_id del dueño 
 SUPABASE_URL      = os.getenv("SUPABASE_PROJECT_URL", "https://ydggwvpndcazmyvsdbec.supabase.co")
 SUPABASE_KEY      = os.getenv("SUPABASE_SECRET_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+FB_ACCESS_TOKEN   = os.getenv("FB_ACCESS_TOKEN", "")
+FB_AD_ACCOUNT_ID  = os.getenv("FB_AD_ACCOUNT_ID", "")
 
 # ── Cliente Supabase ──────────────────────────────────────────────────────────
 
@@ -205,6 +208,28 @@ def obtener_usuarios_activos(desde: str, hasta: str) -> int:
     except Exception as e:
         log.error(f"Error obteniendo usuarios: {e}")
         return 0
+
+def obtener_metricas_fb(desde: str, hasta: str) -> dict:
+    """Consulta Facebook Ads Graph API. Retorna {} si no hay token o si falla."""
+    if not FB_ACCESS_TOKEN or not FB_AD_ACCOUNT_ID:
+        return {}
+    try:
+        url    = f"https://graph.facebook.com/v19.0/act_{FB_AD_ACCOUNT_ID}/insights"
+        params = {
+            "access_token": FB_ACCESS_TOKEN,
+            "time_range":   f'{{"since":"{desde[:10]}","until":"{hasta[:10]}"}}',
+            "fields":       "spend,impressions,reach,clicks,ctr,cpc,cpp,actions,action_values,roas",
+            "level":        "account",
+        }
+        with httpx.Client(timeout=15) as http:
+            r = http.get(url, params=params)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            return data[0] if data else {}
+    except Exception as e:
+        log.warning(f"[FB_ADS] {e}")
+        return {}
+
 
 # ── Motor de reportes ─────────────────────────────────────────────────────────
 
@@ -388,6 +413,33 @@ def generar_reporte(desde: str, hasta: str, cliente: str = None, titulo: str = "
         elif tasa_aprobacion < 50 and total_contenidos > 3:
             lineas.append(f"  📝 Tasa de aprobación baja ({tasa_aprobacion}%) — ajustar estilo.")
 
+    # ── Sección Facebook Ads (solo si hay token configurado) ──────────────────
+    fb = obtener_metricas_fb(desde, hasta)
+    if fb:
+        spend    = fb.get("spend", "—")
+        impress  = fb.get("impressions", "—")
+        reach    = fb.get("reach", "—")
+        clicks   = fb.get("clicks", "—")
+        ctr      = fb.get("ctr", "—")
+        cpc      = fb.get("cpc", "—")
+        roas_raw = fb.get("roas", [])
+        roas     = roas_raw[0].get("value", "—") if roas_raw else "—"
+        actions  = fb.get("actions", [])
+        leads    = next((a.get("value", "0") for a in actions if a.get("action_type") == "lead"), "0")
+        lineas += [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━",
+            "📣 *FACEBOOK ADS*",
+            f"  • 💰 Gasto: ${spend}",
+            f"  • 👁 Impresiones: {impress}",
+            f"  • 👥 Alcance: {reach}",
+            f"  • 🖱 Clicks: {clicks}",
+            f"  • 📊 CTR: {ctr}%",
+            f"  • 💵 CPC: ${cpc}",
+            f"  • 🎯 Leads: {leads}",
+            f"  • 📈 ROAS: {roas}",
+        ]
+
     lineas.append("")
     lineas.append("_Agencia AI — Bot 4 Analytics_ 🤖")
 
@@ -421,6 +473,43 @@ async def cmd_reporte_cliente(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(texto, parse_mode="Markdown")
     metricas = _calcular_metricas(desde, hasta, cliente)
     threading.Thread(target=analizar_y_guardar, args=(metricas, f"{desde[:10]}→{hasta[:10]}", cliente), daemon=True).start()
+
+
+async def cmd_fb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Muestra métricas FB Ads de la semana actual: /fb"""
+    await update.message.reply_text("📣 Consultando Facebook Ads...")
+    desde, hasta = semana_actual()
+    fb = obtener_metricas_fb(desde, hasta)
+    if not fb:
+        await update.message.reply_text(
+            "⚠️ Sin datos de Facebook Ads.\n"
+            "Verifica que FB\\_ACCESS\\_TOKEN y FB\\_AD\\_ACCOUNT\\_ID estén configurados.",
+            parse_mode="Markdown"
+        )
+        return
+    spend    = fb.get("spend", "—")
+    impress  = fb.get("impressions", "—")
+    reach    = fb.get("reach", "—")
+    clicks   = fb.get("clicks", "—")
+    ctr      = fb.get("ctr", "—")
+    cpc      = fb.get("cpc", "—")
+    roas_raw = fb.get("roas", [])
+    roas     = roas_raw[0].get("value", "—") if roas_raw else "—"
+    actions  = fb.get("actions", [])
+    leads    = next((a.get("value", "0") for a in actions if a.get("action_type") == "lead"), "0")
+    texto = (
+        f"📣 *FACEBOOK ADS — Semana actual*\n"
+        f"📅 {desde[:10]} → {hasta[:10]}\n\n"
+        f"💰 Gasto: ${spend}\n"
+        f"👁 Impresiones: {impress}\n"
+        f"👥 Alcance: {reach}\n"
+        f"🖱 Clicks: {clicks}\n"
+        f"📊 CTR: {ctr}%\n"
+        f"💵 CPC: ${cpc}\n"
+        f"🎯 Leads: {leads}\n"
+        f"📈 ROAS: {roas}"
+    )
+    await update.message.reply_text(texto, parse_mode="Markdown")
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -495,6 +584,7 @@ def main():
     app.add_handler(CommandHandler("start",            cmd_start))
     app.add_handler(CommandHandler("reporte",          cmd_reporte))
     app.add_handler(CommandHandler("reporte_cliente",  cmd_reporte_cliente))
+    app.add_handler(CommandHandler("fb",               cmd_fb))
 
     # Iniciar el bot (polling)
     log.info("Bot 4 Analytics iniciado.")
