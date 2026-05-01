@@ -9,6 +9,17 @@ Comandos:
   /reporte_cliente Nombre     — reporte específico de un cliente
 """
 
+import threading, time, requests, os
+def _keepalive():
+    time.sleep(30)
+    while True:
+        try:
+            port = int(os.getenv("PORT", "8000"))
+            requests.get(f"http://localhost:{port}/health", timeout=5)
+        except: pass
+        time.sleep(600)
+threading.Thread(target=_keepalive, daemon=True).start()
+
 import os
 import logging
 from datetime import datetime, timedelta, timezone
@@ -17,6 +28,9 @@ import anthropic
 import threading
 import time
 import httpx
+
+import uvicorn
+from fastapi import FastAPI
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -50,6 +64,61 @@ FB_AD_ACCOUNT_ID  = os.getenv("FB_AD_ACCOUNT_ID", "")
 # ── Cliente Supabase ──────────────────────────────────────────────────────────
 
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ── FastAPI HTTP server ───────────────────────────────────────────────────────
+
+api = FastAPI(title="agencia-ai-analytics", version="1.0.0")
+
+
+@api.get("/health")
+def health():
+    return {"status": "ok", "service": "agencia-ai-analytics"}
+
+
+@api.get("/analytics/reporte")
+def reporte_endpoint():
+    desde = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()[:19] + "Z"
+    hasta = datetime.now(timezone.utc).isoformat()[:19] + "Z"
+
+    leads = []
+    try:
+        r = sb.table("leads").select("estado,ts_creado,canal_preferido,nombre").gte("ts_creado", desde).execute()
+        leads = r.data or []
+    except Exception as e:
+        log.warning(f"leads query: {e}")
+
+    total    = len(leads)
+    cerrados = sum(1 for l in leads if l.get("estado") == "cerrado")
+    pct      = round(cerrados / total * 100) if total else 0
+    revenue  = cerrados * 197
+
+    fb = obtener_metricas_fb(desde, hasta)
+    roas_raw = fb.get("roas", [])
+    roas_val = roas_raw[0].get("value") if roas_raw else None
+    actions  = fb.get("actions", [])
+    fb_leads = next((a.get("value") for a in actions if a.get("action_type") == "lead"), None)
+
+    return {
+        "periodo":        {"desde": desde[:10], "hasta": hasta[:10]},
+        "leads_total":    total,
+        "cerrados":       cerrados,
+        "conversion_pct": pct,
+        "revenue":        revenue,
+        "impressions":    fb.get("impressions"),
+        "clicks":         fb.get("clicks"),
+        "spend":          fb.get("spend"),
+        "ctr":            fb.get("ctr"),
+        "cpc":            fb.get("cpc"),
+        "roas":           roas_val,
+        "fb_leads":       fb_leads,
+        "metrics":        fb,
+    }
+
+
+def _run_api():
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(api, host="0.0.0.0", port=port, log_level="warning")
+
 
 # ── Retry Claude 529 ──────────────────────────────────────────────────────────
 
@@ -571,6 +640,8 @@ async def post_init(app: Application):
 def main():
     if not TELEGRAM_TOKEN:
         raise RuntimeError("ANALYTICS_BOT_TOKEN no configurado en variables de entorno.")
+
+    threading.Thread(target=_run_api, daemon=True).start()
 
     # Construir la aplicación — post_init arranca el scheduler en el mismo event loop
     app = (
