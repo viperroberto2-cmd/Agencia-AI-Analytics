@@ -133,7 +133,7 @@ async def analytics_chat(request: Request):
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     try:
         resp = claude_con_retry(client,
-            model="claude-sonnet-4-6",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1000,
             system=_ANALYTICS_SYSTEM,
             messages=[{"role": "user", "content": mensaje}],
