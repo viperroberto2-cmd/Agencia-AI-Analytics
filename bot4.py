@@ -31,6 +31,7 @@ import httpx
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -68,6 +69,17 @@ sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ── FastAPI HTTP server ───────────────────────────────────────────────────────
 
 api = FastAPI(title="agencia-ai-analytics", version="1.0.0")
+
+api.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_tg_bot = None
+_tg_loop = None
 
 
 @api.get("/health")
@@ -113,6 +125,27 @@ def reporte_endpoint():
         "fb_leads":       fb_leads,
         "metrics":        fb,
     }
+
+
+@api.post("/analytics/reporte")
+async def reporte_post_endpoint(request: Request):
+    """Genera reporte y lo envía por Telegram si enviar_telegram=True."""
+    import asyncio as _asyncio
+    data = {}
+    try:
+        data = await request.json()
+    except Exception:
+        pass
+    enviar_telegram = data.get("enviar_telegram", False)
+    desde = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()[:19] + "Z"
+    hasta = datetime.now(timezone.utc).isoformat()[:19] + "Z"
+    texto = generar_reporte(desde, hasta, titulo="REPORTE — GENERADO DESDE DASHBOARD")
+    if enviar_telegram and DIRECTOR_CHAT_ID and _tg_bot and _tg_loop:
+        _asyncio.run_coroutine_threadsafe(
+            _tg_bot.send_message(chat_id=DIRECTOR_CHAT_ID, text=texto, parse_mode="Markdown"),
+            _tg_loop,
+        )
+    return {"status": "ok"}
 
 
 _ANALYTICS_SYSTEM = (
@@ -654,6 +687,10 @@ async def post_init(app: Application):
     para garantizar que comparte el mismo event loop y puede llamar
     a app.bot.send_message() sin conflictos.
     """
+    global _tg_bot, _tg_loop
+    import asyncio as _asyncio
+    _tg_bot = app.bot
+    _tg_loop = _asyncio.get_event_loop()
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
         enviar_reporte_semanal,
