@@ -30,7 +30,7 @@ import time
 import httpx
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -113,6 +113,36 @@ def reporte_endpoint():
         "fb_leads":       fb_leads,
         "metrics":        fb,
     }
+
+
+_ANALYTICS_SYSTEM = (
+    "Eres el Analytics Bot de la Agencia AI de Roberto. "
+    "Especialista en métricas de marketing digital, Facebook Ads, leads, conversión y ROI. "
+    "Ayudas a interpretar datos, identificar tendencias y dar recomendaciones accionables. "
+    "Responde en español, con datos concretos y análisis directo al punto."
+)
+
+@api.post("/analytics/chat")
+async def analytics_chat(request: Request):
+    """Endpoint para el dashboard — chat directo con Analytics Bot."""
+    data = await request.json()
+    mensaje = data.get("mensaje", "")
+    user_id = data.get("user_id", "dashboard")
+    if not mensaje:
+        return {"respuesta": ""}
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        resp = claude_con_retry(client,
+            model="claude-sonnet-4-6",
+            max_tokens=1000,
+            system=_ANALYTICS_SYSTEM,
+            messages=[{"role": "user", "content": mensaje}],
+        )
+        respuesta = resp.content[0].text
+    except Exception as e:
+        log.error(f"[CHAT] Error: {e}")
+        respuesta = f"Error procesando consulta: {e}"
+    return {"respuesta": respuesta}
 
 
 def _run_api():
