@@ -576,6 +576,97 @@ def generar_reporte(desde: str, hasta: str, cliente: str = None, titulo: str = "
 
     return "\n".join(lineas)
 
+# ── LOOP AGÉNTICO ANALYTICS ──────────────────────────────────
+import datetime as _dt
+
+ANALYTICS_TOOLS = [
+    {"name": "calcular_metricas",
+     "description": "Calcula métricas de la agencia para un período: proyectos, conversiones, engagement.",
+     "input_schema": {"type": "object",
+                      "properties": {"desde": {"type": "string"}, "hasta": {"type": "string"},
+                                     "cliente": {"type": "string", "default": ""}}}},
+    {"name": "obtener_proyectos",
+     "description": "Lista proyectos activos y completados con estado y métricas.",
+     "input_schema": {"type": "object",
+                      "properties": {"desde": {"type": "string"}, "hasta": {"type": "string"},
+                                     "cliente": {"type": "string", "default": ""}}}},
+    {"name": "metricas_facebook",
+     "description": "Métricas de Facebook/Instagram: alcance, engagement, seguidores.",
+     "input_schema": {"type": "object",
+                      "properties": {"desde": {"type": "string"}, "hasta": {"type": "string"}}}},
+    {"name": "obtener_logs",
+     "description": "Logs de actividad de los bots para detectar errores o patrones.",
+     "input_schema": {"type": "object",
+                      "properties": {"desde": {"type": "string"}, "hasta": {"type": "string"},
+                                     "cliente": {"type": "string", "default": ""}}}},
+    {"name": "generar_reporte_completo",
+     "description": "Reporte narrativo con métricas, análisis, insights y recomendaciones.",
+     "input_schema": {"type": "object",
+                      "properties": {"desde": {"type": "string"}, "hasta": {"type": "string"},
+                                     "cliente": {"type": "string", "default": ""},
+                                     "titulo": {"type": "string", "default": "REPORTE SEMANAL"}}}}
+]
+
+ANALYTICS_SYSTEM = (
+    "Eres el Analista de Agencia AI. Transformas datos en decisiones accionables. "
+    "Flujo: 1) Calcula métricas del período, 2) Obtén proyectos y redes, "
+    "3) Identifica patrones y anomalías, 4) Recomienda acciones priorizadas. "
+    "Eres directo: qué funciona, qué no, qué hacer exactamente."
+)
+
+def _fechas_default_analytics() -> tuple:
+    hoy = _dt.date.today()
+    return (hoy - _dt.timedelta(days=7)).strftime("%Y-%m-%d"), hoy.strftime("%Y-%m-%d")
+
+def _tool_analytics(name: str, inp: dict) -> str:
+    _d, _h  = _fechas_default_analytics()
+    desde   = inp.get("desde", _d)
+    hasta   = inp.get("hasta", _h)
+    cliente = inp.get("cliente") or None
+    try:
+        if name == "calcular_metricas":
+            return json.dumps(_calcular_metricas(desde, hasta, cliente), ensure_ascii=False, default=str)
+        elif name == "obtener_proyectos":
+            return json.dumps(obtener_proyectos(desde, hasta, cliente), ensure_ascii=False, default=str)
+        elif name == "metricas_facebook":
+            return json.dumps(obtener_metricas_fb(desde, hasta), ensure_ascii=False, default=str)
+        elif name == "obtener_logs":
+            return json.dumps(obtener_logs(desde, hasta, cliente)[:50], ensure_ascii=False, default=str)
+        elif name == "generar_reporte_completo":
+            return generar_reporte(desde, hasta, cliente, inp.get("titulo", "REPORTE SEMANAL"))
+        return f"Tool desconocida: {name}"
+    except Exception as e:
+        return f"Error en {name}: {e}"
+
+async def loop_agentico_analytics(instruccion: str) -> str:
+    messages = [{"role": "user", "content": instruccion}]
+    for _ in range(10):
+        resp = claude_con_retry(claude, model="claude-haiku-4-5-20251001", max_tokens=4096,
+                                system=ANALYTICS_SYSTEM, tools=ANALYTICS_TOOLS, messages=messages)
+        if resp.stop_reason == "end_turn":
+            return "".join(b.text for b in resp.content if hasattr(b, "text"))
+        if resp.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": resp.content})
+            tool_results = [{"type": "tool_result", "tool_use_id": b.id,
+                             "content": _tool_analytics(b.name, b.input)}
+                            for b in resp.content if b.type == "tool_use"]
+            messages.append({"role": "user", "content": tool_results})
+    return "Análisis completado."
+
+@api.post("/analytics/task")
+async def analytics_task(request: Request):
+    body         = await request.json()
+    instruccion  = body.get("instruccion", body.get("tarea", ""))
+    resultado    = await loop_agentico_analytics(instruccion)
+    callback_url = body.get("callback_url")
+    if callback_url:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.post(callback_url,
+                         json={"job_id": body.get("job_id"), "resultado": resultado},
+                         headers={"x-callback-secret": body.get("callback_secret", "")})
+    return {"status": "ok", "resultado": resultado}
+# ── FIN LOOP AGÉNTICO ANALYTICS ──────────────────────────────
+
 # ── Comandos de Telegram ──────────────────────────────────────────────────────
 
 async def cmd_reporte(update: Update, context: ContextTypes.DEFAULT_TYPE):
