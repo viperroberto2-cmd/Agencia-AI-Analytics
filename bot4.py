@@ -638,7 +638,7 @@ def _tool_analytics(name: str, inp: dict) -> str:
     except Exception as e:
         return f"Error en {name}: {e}"
 
-async def loop_agentico_analytics(instruccion: str) -> str:
+async def loop_agentico_analytics(instruccion: str, cliente: str = "") -> str:
     messages = [{"role": "user", "content": instruccion}]
     for _ in range(10):
         resp = claude_con_retry(claude, model="claude-haiku-4-5-20251001", max_tokens=4096,
@@ -657,7 +657,8 @@ async def loop_agentico_analytics(instruccion: str) -> str:
 async def analytics_task(request: Request):
     body         = await request.json()
     instruccion  = body.get("instruccion", body.get("tarea", ""))
-    resultado    = await loop_agentico_analytics(instruccion)
+    cliente      = body.get("cliente", "")
+    resultado    = await loop_agentico_analytics(instruccion, cliente=cliente)
     callback_url = body.get("callback_url")
     if callback_url:
         async with httpx.AsyncClient(timeout=10) as c:
